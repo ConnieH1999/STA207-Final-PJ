@@ -1,0 +1,660 @@
+---
+title: "STA207 Final Project: Neuronal activity in the visual cortex during decision-making in mice"
+author: "Jianing Hao"
+date: "3-8-2023"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE,results = TRUE)
+```
+
+
+# Background
+
+In this project, we analyze a subset of data collected by Steinmetz et al. (2019). While this document provides the basic understanding of the experiments, it is highly recommended that one consults the original publication for a more comprehensive understanding in order to improve the quality of the analysis report.
+
+
+In the study conducted by Steinmetz et al. (2019), experiments were performed on a total of 10 mice over 39 sessions. Each session comprised several hundred trials, during which visual stimuli were randomly presented to the mouse on two screens positioned on both sides of it. The stimuli varied in terms of contrast levels, which took values in {0, 0.25, 0.5, 1}, with 0 indicating the absence of a stimulus. The mice were required to make decisions based on the visual stimuli, using a wheel controlled by their forepaws. A reward or penalty was subsequently administered based on the outcome of their decisions. The activity of the neurons in the mice's visual cortex was recorded during the trials and made available in the form of spike trains, which are collections of timestamps corresponding to neuron firing. 
+
+In this project, we focus specifically on the spike trains of neurons in the visual cortex, from the onset of the stimuli to 0.4 seconds post-onset. In addition, we only use five sessions (Sessions 1 to 5) from two mice (Cori and Frossman).
+
+
+# Data structure 
+
+A total of 5 RDS files are provided that contain the records from five sessions. In each RDS file, you can find the name of mouse from `mouse_name` and date of the experiment from `date_exp`. 
+
+```{r,message=F,warning=FALSE,results='hide',echo=FALSE, eval=TRUE}
+library(tidyverse)
+library(lme4)
+library(lmerTest)
+library(ggplot2)
+library(knitr)
+library(dplyr)
+library(tidyr)
+library(kableExtra)
+library(gridExtra)
+library(gplots)
+library(pROC)
+
+
+session=list()
+for(i in 1:5){
+  session[[i]]=readRDS(paste('/Users/conniefile/Desktop/use/UCD/23Win/STA207/Final PJ/session',i,'.rds',sep=''))
+  print(session[[i]]$mouse_name)
+  print(session[[i]]$date_exp)
+}
+```
+
+Five variables are available for each trial, namely 
+
+- `feedback_type`: type of the feedback, 1 for success and -1 for failure
+- `contrast_left`: contrast of the left stimulus
+- `contrast_right`: contrast of the right stimulus
+- `time`: centers of the time bins for `spks`  
+- `spks`: numbers of spikes of neurons in the visual cortex in time bins defined in `time`
+
+```{r,message=F,warning=FALSE,results='hide'}
+# Rename eval=TRUE if you want the output to appear in the report.
+# Take the 11th trial in Session 1 for example
+id=11
+table(session[[1]]$feedback_type[id])
+session[[1]]$contrast_left[id]
+session[[1]]$contrast_right[id]
+length(session[[1]]$time[[id]])
+dim(session[[1]]$spks[[id]])
+```
+
+# Questions of Interest
+
+The primary objectives of this project is to understand how the neural activity in the visual cortex is modulated by the two stimuli and how this information can be utilized to predict the outcome of the trial. To be specific, two questions of interest are as follows. 
+
+1. How do neurons in the visual cortex respond to the stimuli presented on the left and right?
+2. How to predict the outcome of each trial using the neural activities and stimuli?
+
+
+# Abstract
+
+This project aims to analyze a subset of data collected by Steinmetz et al. (2019). We focus on the spike trains of neurons in the visual cortex and use 5 sessions from 2 mice. First, after descriptive statistical analysis, we conducted a mixed effect model and model diagnostics. Second, we trained predictive model for Q2. 
+
+# Introduction
+
+The visual cortex is a critical brain region for processing visual information and enabling animals to make decisions based on visual cues. In recent years, advances in neuroscience techniques have allowed for the recording of neural activity in the visual cortex of mice, which provides insights into the neural mechanisms underlying decision-making. 
+
+This study mainly aimed to investigate the relationship between mean firing rate and several predictors including `contrast_left`, `contrast_right`, `firing_rate`, and `session`. Descriptive statistics were used to explore the data and a two-way ANOVA model with interaction and random effect was built to estimate the coefficients. Hypothesis testing was conducted to demonstrate the model's rationality. Additionally, a logistic model was developed to predict `feedback_type` based on the predictors, and model performance was assessed using a test set. 
+
+The results suggest that the interaction of `contrast_left` and `contrast_right` has a significant impact on mean firing rate, and `session` should be considered as a random effect. The logistic model showed good fit for predicting `feedback_type`.
+
+# Background. Review and provide basic background of the experiment
+
+In a research conducted by Steinmetz et al. (2019), ten mice were studied in a total of 39 sessions. Each session included hundreds of trials in which visual stimuli were randomly presented on two screens placed on either side of the mouse. The stimuli varied in contrast levels with values ranging from {0, 0.25, 0.5, 1}, where 0 indicated no stimulus. The mice were required to make decisions based on the visual stimuli using a wheel controlled by their forepaws. Depending on the outcome of their decisions, they were either rewarded or punished. The activity of neurons in the visual cortex of the mice was recorded during the trials and provided in the form of a sequence of pulses, which constituted a collection of timestamps corresponding to the neural discharges.
+
+In this analysis, we take 0.4-second time interval. In addition, we only use 5 sessions (Sessions 1 to 5) from two mice (Cori and Frossman).
+
+# Part1. Descriptive analysis
+
+## Description of the data set
+
+```{r,message=F,warning=FALSE} 
+# Obtain the firing rate 
+# averaged over [0,0.4] seconds
+# averaged across all neurons 
+firingrate_c=c()
+for(ID in 1:5){
+  t=0.4 # from Background 
+
+  n.trials=length(session[[ID]]$spks)
+  n.neurons=dim(session[[ID]]$spks[[1]])[1]
+
+  # Obtain the firing rate 
+  firingrate=numeric(n.trials)
+  for(i in 1:n.trials){
+    firingrate[i]=sum(session[[ID]]$spks[[i]])/n.neurons/t
+  }
+  firingrate_c=c(firingrate_c,firingrate)
+}
+
+contrast_left_c=c()
+for(ID in 1:5){
+  contrast_left_c=c(contrast_left_c,session[[ID]]$contrast_left)
+}
+
+contrast_right_c=c()
+for(ID in 1:5){
+  contrast_right_c=c(contrast_right_c,session[[ID]]$contrast_right)
+}
+
+feedback_type_c=c()
+session_c=c()
+for(ID in 1:5){
+  feedback_type_c=c(feedback_type_c,session[[ID]]$feedback_type)
+  session_c=c(session_c,rep(ID, times=length(session[[ID]]$feedback_type)))
+}
+
+df=data.frame(cbind(contrast_left_c,contrast_right_c,feedback_type_c,firingrate_c,session_c))
+animal=c(rep('Cori',times=length(df$contrast_left_c)))
+df=cbind(df,animal)
+df[df$session_c == 4|df$session_c==5,]$animal='Forssmann'
+df$contrast_left_c=as.factor(df$contrast_left_c)
+df$contrast_right_c=as.factor(df$contrast_right_c)
+df$feedback_type_c=as.factor(df$feedback_type_c)
+df$session_c=as.factor(df$session_c)
+colnames(df)=c("contrast_left","contrast_right","feedback_type","firing_rate","session","animal")
+
+session_info <- data.frame(
+  session_no = 1:5,
+  mouse_name = c(rep("Cori", 3), rep("Forssmann", 2)),
+  date = c("2016-12-14", "2016-12-17", "2016-12-18", "2017-11-01", "2017-11-02"),
+  n_trials = c(214, 251, 228, 249, 254),
+  n_neurons = c(178, 553, 228, 120, 99)
+)
+
+kable(session_info, align = "c",format = "html", caption = "Summary of session information")%>%
+  column_spec(1:5, border_left = TRUE,border_right = TRUE,bold = T) %>% # add vertical line
+  kable_styling(full_width = FALSE) %>% 
+  row_spec(0, bold = TRUE) %>% 
+  scroll_box(width = "100%", height = "300px")
+
+```
+
+## Define mean firing rate as the outcome variable and calculate
+
+In this analysis, we define `mean firing rate` as the outcome variable. Calculating the mean firing rate as the average number of spikes per second across all neurons within a given 0.4 seconds time interval is a commonly used approach in neuroscience. The formula of `firing_rate` for each trial is as followed. 
+
+$$mean\ firing\ rate=\frac{sum\ of\ spikes}{number\ of\ neurons\times time\ interval}\\$$
+
+*e.g.The mean firing rate of the 1st trial in session 1 is $\frac{441}{178\times0.4}=6.193820$.*
+
+**Justifications for this method:**
+
+- This method is widely used in the field of neuroscience and has been used in many previous studies investigating the neural activity of the visual cortex. 
+- The mean firing rate is a measure that takes into account the activity of all neurons in the visual cortex, which provides a collective response of the neural population, reflecting the overall activity of the brain.
+- This method reduces the dimensions of the data by aggregating the activity of multiple neurons into a single value for each trial. This makes it easier to compare neural responses across trials and sessions. For example, it reduces the dimensions of the first outcome in session 1 from $178\times39$ to $1$. 
+- This method measures the firing rate within a specific time interval (0.4 seconds in this case), so we can more precisely determine the temporal relationship between the stimuli and the neural activity. Moreover, a 0.4-second time interval is a reasonable one, as it is long enough to capture a sufficient amount of neural activity, but short enough to avoid including activity from other sources or time periods.
+- This method allows for the application of statistical techniques that assume normally distributed data. This can be useful in hypothesis testing and other types of analyses.
+
+
+## Univariate descriptions for `contrast_left`, `contrast_right` and `firing_rate`
+
+```{r fig.cap="**Figure 1:** Distribution of contrast left levels by session"}
+ggplot(df, aes(x = contrast_left, fill = session)) +
+  geom_bar() +
+  labs(x = "Contrast left levels", y = "Frequency", title = "Distribution of contrast left levels by session") +
+  facet_wrap(~ session, ncol = 5)
+```
+
+```{r fig.cap="**Figure 2:** Distribution of contrast right levels by session"}
+ggplot(df, aes(x = contrast_right, fill = session)) +
+  geom_bar() +
+  labs(x = "Contrast right levels", y = "Frequency", title = "Distribution of contrast right levels by session") +
+  facet_wrap(~ session, ncol = 5)
+```
+
+```{r fig.cap="**Figure 3:** Distribution of contrast (left,right) combinations by session"}
+ggplot(df, aes(x = contrast_left, y = contrast_right)) +
+  geom_bin2d(binwidth = c(0.1, 0.1), aes(fill = after_stat(count))) +
+  scale_fill_gradient(low = "white", high = "blue") +
+  facet_wrap(~session, ncol = 5)
+```
+
+```{r fig.cap="**Figure 4:** Distribution of mean firing rate by session"}
+ggplot(df, aes(x = firing_rate, color = session)) + 
+  geom_density(aes(fill = session), alpha = 0.2) +
+  labs(x = "Mean firing rate", y = "Density", title = "Distribution of mean firing rate by session") +
+  theme_bw()
+```
+
+**Findings:**
+
+- According to **Fig1** and **Fig2**, we can see as independent variables, `contrast_left` and `contrast_right` distributed slightly differently across five sessions. Which indicates that we should consider conducting model for each session separately.
+- According to **Fig3**, when we consider contrast combinations in each sessions, their distributions still vary. There is no obvious trend, which indicates there may not be interaction between `contrast_left` and `contrast_right`. But the variations indicate systematic bias towards certain levels of contrast pairs in the experimental design. 
+It can be useful to consider contrast combinations as pairs, as this allows for a more complete understanding of how the visual cortex responds to different stimuli. Pairing the contrasts can also provide insights into any interactions that may exist between them, which can be important for understanding how information is processed and represented in the brain.
+- According to **Fig4**, we can see that the overall distribution of `firing_rate` appears to be roughly normal for each session, but with some extreme values, long tails and different means and variances. Moreover, as experiment goes, the mean of `firing_rate` decreasing (lowest mean shows in session 5 while highest mean shows in session 1), indicating lower level of neural activity.
+
+
+```{r,message=F,warning=FALSE,results='hide'}
+session1=df[df$session==1,]
+session2=df[df$session==2,]
+session3=df[df$session==3,]
+session4=df[df$session==4,]
+session5=df[df$session==5,]
+```
+
+
+## Mulivariate descriptions for `contrast_left` and `contrast_right` vs `firing_rate`
+
+```{r fig.cap="**Figure 5:** Main effect of contrast_left vs firing_rate in whole dataset and 5 sessions"}
+par(mfrow=c(2,3))
+plotmeans(firing_rate~contrast_left,data=df,xlab="contrast_left",ylab=" firing_rate", main="whole set") 
+plotmeans(firing_rate~contrast_left,data=session1,xlab="contrast_left",ylab=" firing_rate", main="session1") 
+plotmeans(firing_rate~contrast_left,data=session2,xlab="contrast_left",ylab=" firing_rate", main="session2") 
+plotmeans(firing_rate~contrast_left,data=session3,xlab="contrast_left",ylab=" firing_rate", main="session3") 
+plotmeans(firing_rate~contrast_left,data=session4,xlab="contrast_left",ylab=" firing_rate", main="session4") 
+plotmeans(firing_rate~contrast_left,data=session5,xlab="contrast_left",ylab=" firing_rate", main="session5") 
+```
+
+**Findings from Fig5:**
+
+Apparent differences in `firing_rate` across `contrast_left` in all sessions; Larger variability tends to show in `contrast_left`=0.25; For the first 3 sessions(mouse: Cori), the differences are getting smaller from day1 to day3; Different sample size for each `contrast_left` in all sessions.
+
+
+```{r fig.cap="**Figure 6:** Main effect of contrast_right vs firing_rate in whole dataset and 5 sessions"}
+par(mfrow=c(2,3))
+plotmeans(firing_rate~contrast_right,data=df,xlab="contrast_right",ylab=" firing_rate", main="whole set") 
+plotmeans(firing_rate~contrast_right,data=session1,xlab="contrast_right",ylab=" firing_rate", main="session1") 
+plotmeans(firing_rate~contrast_right,data=session2,xlab="contrast_right",ylab=" firing_rate", main="session2") 
+plotmeans(firing_rate~contrast_right,data=session3,xlab="contrast_right",ylab=" firing_rate", main="session3") 
+plotmeans(firing_rate~contrast_right,data=session4,xlab="contrast_right",ylab=" firing_rate", main="session4") 
+plotmeans(firing_rate~contrast_right,data=session5,xlab="contrast_right",ylab=" firing_rate", main="session5") 
+```
+
+**Findings from Fig6:**
+
+Apparent differences in `firing_rate` across `contrast_right` in all sessions;  There is a positive relationship between `contrast_right` and `firing_rate` in the last 4 sessions; The relationship between `contrast_right` and `firing_rate` have different strengths across sessions; Different sample size for each `contrast_right` in all sessions.
+
+
+```{r fig.cap="**Figure 7:** Interaction of contrast_left and contrast_right vs firing_rate in whold set and 5 sessions"}
+par(mfrow=c(2,3))
+interaction.plot(df$contrast_left,df$contrast_right,df$firing_rate,xlab="contrast_left",ylab="firing_rate", main="whole set")
+interaction.plot(session1$contrast_left,session1$contrast_right,session1$firing_rate,xlab="contrast_left",ylab="firing_rate", main="session1")
+interaction.plot(session2$contrast_left,session2$contrast_right,session2$firing_rate,xlab="contrast_left",ylab="firing_rate", main="session2")
+interaction.plot(session3$contrast_left,session3$contrast_right,session3$firing_rate,xlab="contrast_left",ylab="firing_rate", main="session3")
+interaction.plot(session4$contrast_left,session4$contrast_right,session4$firing_rate,xlab="contrast_left",ylab="firing_rate", main="session4")
+interaction.plot(session5$contrast_left,session5$contrast_right,session5$firing_rate,xlab="contrast_left",ylab="firing_rate", main="session5")
+```
+
+**Findings from Fig7:**
+
+- In the whole dataset, the obvious non-parallel pattern indicates there might be interaction terms between `contrast_left` and `contrast_right`.
+- In session1~session5, the non-parallel pattern are not that obvious, which means there might not be significant interactions between `contrast_left` and `contrast_right`.
+
+## Summary for the first part
+
+**1. Define the outcome variable as mean firing rate and give justifications**
+
+**2. Through the descriptive statistics of univariate and multivariate, we found that the data characteristics of different sessions are different. So consider using session as a random effect.**
+
+**3. Through the descriptive statistics of the interaction, we found that the interaction of `contrast_left` and `contrast_right` has an impact on the dependent variable. So consider adding interaction terms to model**
+
+
+# Part2. Inferential analysis (Q1)
+
+- Inferential analysis (Q1). 
+Consider a  mixed effect model where the two fixed-effect factors are left contrast and right contrast, and a random intercept is included for each session. As a result, Q1 reduces to test the null hypothesis that the two factors have no interaction effect. 
+
+## Define the unbalanced two-way ANOVA model
+
+```{r,message=F,warning=FALSE,results='hide'}
+table(df$contrast_left)
+table(df$contrast_right)
+table(df$session)
+table(df$contrast_left,df$contrast_right,df$session)
+```
+
+The unbalanced two-way ANOVA model with interactions is defined as follows:
+$$Y_{ijmk} = \mu_{\cdot\cdot\cdot} + \alpha_i+\beta_j + (\alpha\beta)_{ij}+\tau_m+\epsilon_{ijmk}\quad k=1,\ldots, n_{ijm},\ m=1,...,5\quad j=1,2,3,4\quad i=1,2,3,4$$ 
+
+- **Where:**
+
+(1) The index $i$ represents the `contrast_left` level: 0 ($i=1$), 0.25 ($i=2$), 0.5 ($i=3$), 1 ($i=4$); the index $j$ represents the `contrast_right` level: 0 ($j=1$), 0.25 ($j=2$), 0.5 ($j=3$), 1 ($j=4$); the index $m$ represents the `session` ID: 1 ($m=1$),..., ($m=5$); the index $k$ represents the unique trials within each combination of `contrast_left` and `contrast_left` and `session` $k=1,...,n_{ijm}$, $n_{111}=46,\ n_{121}=4,\ ...,n_{444=8}$.
+
+(2) $Y_{ijmk}$ represents the `firing_rate` of the kth trial of the mth `session`, of jth `contrast_right` level, of the ith `contrast_left` level.
+
+(3) $\mu_{...}$ represents the overall mean of the `firing_rate` across all `contrast_left` and `contrast_right` levels and `session`.
+
+(4) $\alpha_i$ represents the effect of the ith `contrast_left` level on the `firing_rate`.
+
+(5) $\beta_j$ represents the effect of the jth `contrast_right` level on the `firing_rate`.
+
+(6) $(\alpha\beta)_{ij}$ represents the interaction effect jointly controlled by the `contrast_left` and `contrast_right` on the `firing_rate`.
+
+(7) $\tau_m$ represents the effect of the mth `session` on the `firing_rate`.
+
+(8) $\epsilon_{ijmk}$ represents the residual error term for the kth trials of the mth `session`, of the jth  `contrast_right` level, of the ith `contrast_left` level.
+
+- **Constraints:**
+
+(1) $\sum_{i=1}^4 n_{i\cdot}\alpha_i=\sum_{j=1}^4 n_{\cdot j}\beta_j=0$
+
+(2) $\sum_{i=1}^4 n_{i\cdot}(\alpha\beta)_{ij}=\sum_{j=1}^4 n_{\cdot j}(\alpha\beta)_{ij}=0$
+
+(3) $\tau_m \sim N(0,\sigma_{\tau}^2)$
+
+(4) $\{\epsilon_{ijmk}\} \sim N(0,\sigma^2)$
+
+(5) All random variables are mutually independent.
+
+## Conduct model building and show the fitted outcome
+
+```{r,message=F,warning=FALSE,results='hide'}
+model_df_full=lmer(firing_rate ~ contrast_left*contrast_right+(1|session), data = df)
+summary(model_df_full)
+
+model_df_reduce=lmer(firing_rate ~ contrast_left+contrast_right+(1|session), data = df)
+summary(model_df_reduce)
+
+#heatmap of coefficients
+coef(model_df_full)
+
+anova(model_df_reduce,model_df_full)
+```
+
+```{r fig.cap="**Figure 8:** Estimated Coefficients Heatmap"}
+# create a matrix of estimated coefficients
+coef_mat <- as.matrix(coef(model_df_full)$session)
+
+# create row and column labels
+row_labels <- c("s1", "s2", "s3", "s4", "s5")
+col_labels <- c(rep("Intercept", times = 5),rep("contrast_left0.25", times = 5),rep("contrast_left0.5", times = 5),rep("contrast_left1", times = 5),rep("contrast_right0.25", times = 5),rep("contrast_right0.5", times = 5),rep("contrast_right1", times = 5),rep("contrast_left0.25:contrast_right0.25", times = 5),rep("contrast_left0.5:contrast_right0.25", times = 5),rep("contrast_left1:contrast_right0.25", times = 5),rep("contrast_left0.25:contrast_right0.5", times = 5),rep("contrast_left0.5:contrast_right0.5", times = 5),rep("contrast_left1:contrast_right0.5", times = 5),rep("contrast_left0.25:contrast_right1", times = 5),rep("contrast_left0.5:contrast_right1", times = 5),rep("contrast_left1:contrast_right1", times = 5))
+
+# convert matrix to data frame
+coef_df <- data.frame(
+  row = rep(row_labels, times = 16),
+  col = col_labels,
+  coef = as.vector(coef_mat)
+)
+
+
+# define color scale
+color_scale <- scale_fill_gradient2(
+  low = "blue", mid = "white", high = "red",
+  midpoint = 0, guide = "colorbar"
+)
+
+# create heatmap plot
+ggplot(coef_df, aes(x = row, y = col, fill = coef)) +
+  geom_tile() +
+  coord_equal() +
+  labs(title = "Estimated Coefficients", x = "session", y = "") +
+  theme_minimal() +
+  theme(panel.grid = element_blank()) +
+  color_scale
+```
+
+**Findings from Fig8:**
+
+- Except for the intercepts, the remaining coefficients have no difference between different sessions.
+- The intercepts show a decreasing trend from session 1-5, indicating that the brain activity of the mice generally decreases with time.
+- The impacts of `contrast_left` or `contrast_right` on `firing_rate` are positive; and as the level increases, the impact on `firing_rate` increases. `contrast_right` has a stronger influence on `firing_rate` than `contrast_left`.
+- The impact of interaction of `contrast_left` and `contrast_right on `firing_rate` is negative.
+
+
+## Conduct hypothesis test for interaction terms
+
+$$ H_0: {\rm all\ }{(\alpha\beta)}_{ij}\ {\rm are}\ 0\quad vs\quad  H_1: {\rm not \ all\ } {(\alpha\beta)}_{ij}\ {\rm are\ zero}$$
+We reject the null hypothesis at the significance level $\alpha=0.05$ because $P-value=0.04112$ is less than 0.05, which indicates there is significant interaction between `contrast_left` and `contrast_right`. 
+
+Thus, we select full model (with the interaction terms) as it's a better fit to the data.
+
+
+# Part3. Sensitivity analysis (Q1)
+
+## Draw plots for Model Diagnostics
+
+```{r fig.cap="**Figure 9:** Model Diagnostics plots of full model"}
+residuals_df <- data.frame(resid = residuals(model_df_full), fitted = fitted(model_df_full))
+p1=ggplot(residuals_df, aes(x = fitted, y = resid)) +
+  geom_point(alpha = 0.6, size = 2) +
+  geom_smooth(method = 'loess',formula = 'y ~ x',se = FALSE, span = 0.8) +
+  geom_hline(yintercept = 0, linetype = "dashed",colour = "blue") +
+  labs(title = "Residuals vs Fitted Values",
+       x = "Fitted Values",
+       y = "Residuals") +
+  theme_bw()
+
+p2=ggplot(data = NULL, aes(sample = resid(model_df_full))) +
+  stat_qq() +
+  stat_qq_line(colour = "blue") +
+  xlab("Theoretical Quantiles") + 
+  ylab("Sample Quantiles") + 
+  ggtitle("QQ Plot")+
+  theme_bw()
+
+p3=ggplot(residuals_df, aes(x = fitted, y = sqrt(abs(resid)))) +
+  geom_point() +
+  stat_smooth(method = "loess", formula = 'y ~ x',se = FALSE, color = "blue") +
+  labs(x = "Fitted values", y = "Sqrt(|standardized residuals|)") +
+  ggtitle("Scale-Location Plot")+
+  theme_bw()
+
+residuals <- resid(model_df_full)
+leverages <- hatvalues(model_df_full)
+p4df=data.frame(residuals, leverages)
+p4=ggplot(p4df, aes(x = leverages, y = residuals)) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(method = "loess", formula = 'y ~ x',se = FALSE, color = "red") +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  labs(x = "Leverage", y = "Residuals") +
+  ggtitle("Residuals vs Leverage Plot")+
+  theme_bw()
+
+grid.arrange(p1, p2,p3,p4, ncol = 2)
+```
+
+**Findings from Fig9:**
+
+(1) There is no obvious non-linear patter from residuals vs fitted values, and residuals are randomly distributed around 0, which suggests the selected model is reliable. 
+(2) QQ plot shows roughly normal distribution, but a little bit heavy tailed.
+(3) The the square root of the absolute residuals are randomly scattered around the horizontal line at zero, but the last few values are not, indicating that most residuals have a constant variance across the range of fitted values. 
+(4) There is no obvious outlier.
+
+## Examine on random effects from sessions
+
+- **ICC**
+
+Observations from different groups are uncorrelated while observations from the same group are correlated. We also call the correlation within the same group $\sigma^2_{\mu}/(\sigma^2_{\mu}+\sigma^2)$ **intraclass correlation (ICC)**.
+
+A large ICC indicates $\sigma^2_{\mu}\gg\sigma^2$. Since $\sigma^2$ meansures the variation in the group and $\sigma^2_{\mu}$ measures the variation between different groups, a large ICC means observations from the same group are much more similar than observations from different groups.
+
+```{r,message=F,warning=FALSE,results='hide'}
+model_df_full=lmer(firing_rate ~ contrast_left*contrast_right+(1|session), data = df)
+summary(model_df_full)
+model_df_reds=lm(firing_rate ~ contrast_left*contrast_right, data = df)
+summary(model_df_reds)
+```
+
+Variance components are estimated by REML method. $\hat{\sigma}^2_{\mu}=1.2667, \hat{\sigma}^2=0.39995$. ICC is $1.2667/(1.2667+0.39995)\approx 0.76$ which indicates the variation between different sessions is large. 
+
+- **Likelihood Ratio Test**
+
+Test whether random effects `session` exist. The hypotheses are
+
+$$H_0: \sigma^2_\mu=0\quad vs.\quad H_1: \sigma^2_\mu\neq0$$
+
+```{r,message=F,warning=FALSE,results='hide'}
+anova(model_df_full,model_df_reds)
+```
+
+We reject the null hypothesis at the significance level $\alpha=0.05$ because $P-value< 2.2\times10^{16}$ is less than 0.05, which indicates $\sigma^2_\mu\neq0$. Moreover, the full model with the random effect has a significantly lower AIC and BIC. This suggests that the model with the random effect is a better fit to the data. Therefore, we conclude that it is necessary to account for the random effects from `sessions` in our analysis.
+
+
+## Summary for the second and third parts
+
+**1. A two way anova model with interaction and random effect is built and coefficient estimations are presented.**
+
+**2. The rationality is demonstrated by hypothesis testing of interaction and random effect.**
+
+# Part4.Predictive modeling (Q2)
+
+- When the mouse is given with a higher stimulus on the left screen (`contrast_left` > `contrast_right`) and it pushes the wheel to the left, it will receive a reward (`feedback_type`=1). If it pushes the wheel to the right, it will receive a punishment (`feedback_type`=-1). When the mouse is presented with equal stimuli on both sides (`contrast_left`=`contrast_right`) and they are not equal to zero, it will receive a reward regardless of which direction it pushes the wheel (`feedback_type`=1). When the mouse is presented with no stimulus (`contrast_left`=`contrast_right`=0) and it keeps the wheel stationary for more than 1.5 seconds, it will receive a reward (`feedback_type`=1); otherwise, it will receive a punishment (`feedback_type`=-1).
+
+
+## Descriptive analysis
+
+### (`contrast_left`,`contrast_right`) VS `feedback_type`
+
+According to the design of the reward and penalty mechanism, we think it is more reasonable to consider the relationship between (`contrast_left`,`contrast_right`) combinations and `feedback_type`.
+
+```{r,message=F,warning=F}
+df$feedback_type_num=ifelse(df$feedback_type == "1", 1, -1)
+feedback_means <- df %>% 
+  group_by(contrast_left, contrast_right) %>% 
+  summarize(mean_feedback = mean(feedback_type_num))
+# Create a heatmap
+ggplot(feedback_means, aes(x = contrast_left, y = contrast_right, fill = mean_feedback)) +
+  geom_tile() +
+  scale_fill_gradient2(low = "white", high = "blue",midpoint=0) +
+  labs(title = "Heatmap of feedback_type mean by contrast_left and contrast_right")
+
+df_summary <- df %>%
+  group_by(contrast_left, contrast_right, feedback_type) %>%
+  summarise(count = n()) %>%
+  group_by(contrast_left, contrast_right) %>%
+  mutate(prop = count / sum(count))
+# Plot the stacked bar chart
+ggplot(df_summary, aes(x = factor(contrast_left), y = prop, fill = factor(feedback_type))) +
+  geom_bar(stat = "identity") +
+  facet_wrap(~contrast_right, ncol = 4) +
+  xlab("Contrast Left") +
+  ylab("Proportion of Feedback Types") +
+  labs(fill = "Feedback Type",title = "Stacked bar chart")
+```
+
+**Findings:**
+- From **heatmap** we can know: (1) When the left and right stimuli are the same, the chance of getting the penalty is greater, and the mice are more inclined to stay still. When there was no stimulus left or right, mice are also more likely to be still, i.e. rewarded. (2) When the left and right stimuli are different but close, `contrast_left`>`contrast_right` is more likely to cause penalty, that is, the mice are more inclined to push the wheel to the right. (3) When the difference between the left and right stimuli is large, the mice are more likely to distinguish and thus receive rewards.
+- From **stacked bar chart** we can know: The most rewarding combination is  (`contrast_left`=1,`contrast_right`=0). The most penalized combination is  (`contrast_left`=0.5,`contrast_right`=0.5)
+
+### `firing_rate` VS `feedback_type`
+
+```{r fig.cap="**Figure 9:**Density curve of firing_rate by feedback_type "}
+ggplot(df, aes(x = firing_rate, fill = feedback_type)) +
+  geom_density(alpha = 0.5) +
+  scale_fill_discrete(name = "Feedback Type") +
+  labs(x = "Firing Rate", y = "Density") +
+  theme_bw()
+```
+
+**Findings:** 
+
+From **Fig9**, the density curves for `firing_rate` by `feedback_type` look similar. But when `firing_rate` goes higher, which means the brain is more active, `feedback_type` is more likely to be 1, which represents mouse get reward. When `firing_rate` is very low, which means the brain is not active, `feedback_type` is more likely to be -1, which represents mouse get penalty.
+
+### `session` VS `feedback_type`
+
+```{r fig.cap="**Figure 10:**Stacked bar chart for session VS feedback_type"}
+ggplot(df, aes(x = session, fill = feedback_type))+
+  geom_bar(position = "stack") +
+  labs(x = "Session", y = "Count", fill = "Feedback Type") +
+  theme_bw()
+```
+
+**Findings:** 
+
+From **Fig10**, the number of trials with `feedback_type`=1 is generally higher than that with `feedback_type`=-1 across all sessions while  the proportion of `feedback_type`=1 and `feedback_type`=-1 trials within each session varies. This suggests that the `feedback_type` is not evenly distributed across all sessions and there may be some underlying factors influencing the distribution of `feedback_type`.
+
+
+## Prediction model using logistic regression
+
+To model a binary variable `feedback_type`, `feedback_type`=1 or `feedback_type`=-1, we use logistic regression:
+
+$$logit(\pi_i)=\beta_0+\beta_1X_1+\beta_2X_2+\beta_3X_3+\beta_4X_4$$
+where $\pi_i = p(Y_i=1|X_i)$. 
+
+(1) $X_1=$`contrast_left`.
+
+(2) $X_2=$`contrast_right`: mother's weight in pounds at last menstrual period.
+
+(3) $X_3=$`firing_rate`: mother's race (1 = white, 2 = black, 3 = other).
+
+(4) $X_4=$`session`: smoking status during pregnancy.
+
+(5) $Y_i=$`feedback_type`
+
+Before conduct the model, we firstly select the first 100 trials in session1 as test set, and the left trials as train set.
+
+```{r,message=F,warning=F,results='hide'}
+df_train = df[-c(1:100),]
+df_test = df[1:100,]
+model_log=glm(feedback_type~contrast_left+contrast_right+firing_rate+session,family = binomial(), data = df_train)
+summary(model_log)
+```
+
+### Interpretation
+
+The fitted model is :
+$$ logit\{P(get\ reward)\}= -2.46-0.20X_{contrast\ left =0.25}-0.46X_{contrast\ left = 0.5}-0.27X_{contrast\ left = 1}-X_{contrast\ right = 0.25}\\-0.93X_{contrast\ right = 0.5}-0.93X_{contrast\ right = 1}+0.97X_{firing\ rate}+0.49X_{session=2}+0.33X_{session=3}+1.88X_{session=4}+2.59X_{session=5}$$
+
+- Effect of `contrast_left`: 
+(1) The odds of a mouse getting reward in a trial with giving 0.25 level of `contrast_left` is $e^{-0.2}=0.819$ times that of getting penalty with giving 0 levels of `contrast_left` in a trial.
+(2) The odds of a mouse getting reward in a trial with giving 0.5 level of `contrast_left` is $e^{-0.46}=0.631$ times that of getting penalty with giving 0 levels of `contrast_left` in a trial.
+(3) The odds of a mouse getting reward in a trial with giving 1 level of `contrast_left` is $e^{-0.27}=0.763$ times that of getting penalty with giving 0 levels of `contrast_left` in a trial.
+- Effect of `contrast_right`: 
+(1) The odds of a mouse getting reward in a trial with giving 0.25 level of `contrast_right` is $e^{-1}=0.368$ times that of getting penalty with giving 0 levels of `contrast_right` in a trial.
+(2) The odds of a mouse getting reward in a trial with giving 0.5 level of `contrast_right` is $e^{-0.93}=0.395$ times that of getting penalty with giving 0 levels of `contrast_right` in a trial.
+(3) The odds of a mouse getting reward in a trial with giving 1 level of `contrast_right` is $e^{-0.93}=0.395$ times that of getting penalty with giving 0 levels of `contrast_right` in a trial.
+- Effect of `firing_rate`: 
+The odds of a mouse getting reward in a trial is $e^{0.97}=2.638$ times that of getting penalty when `firing_rate` increases 1 unit from 0.
+- Effect of `session`: 
+(1) The odds of a mouse getting reward in a trial in session2 is $e^{0.49}=1.632$ times that of getting penalty in session1.
+(2) The odds of a mouse getting reward in a trial in session3 is $e^{0.33}=1.391$ times that of getting penalty in session1.
+(3) The odds of a mouse getting reward in a trial in session4 is $e^{1.88}=6.554$ times that of getting penalty in session1.
+(4) The odds of a mouse getting reward in a trial in session5 is $e^{2.59}=13.33$ times that of getting penalty in session1.
+
+### Model Diagnostics
+
+Use residuals plots to check if there is any systematic pattern left in the residuals.
+
+```{r fig.cap="**Figure 11:**Pearson residuals plot and deviance residuals plot"}
+res.P = residuals(model_log, type = "pearson")
+res.D = residuals(model_log, type = "deviance")
+par(mfrow=c(1,2))
+plot(model_log$fitted.values, res.P, pch=16, cex=0.6, ylab='Pearson Residuals', xlab='Fitted Values')
+lines(smooth.spline(model_log$fitted.values, res.P, spar=0.9), col=2)
+abline(h=0, lty=2, col='grey')
+plot(model_log$fitted.values, res.D, pch=16, cex=0.6, ylab='Deviance Residuals', xlab='Fitted Values')
+lines(smooth.spline(model_log$fitted.values, res.D, spar=0.9), col=2)
+abline(h=0, lty=2, col='grey')
+```
+
+**Findings:** From **Fig11**, the red curves are around 0 in both plots, but may have a slight non-linear pattern. 
+
+
+### Prediction, Sensitivity and Specificity
+
+As said previously, we split the dataset into test set (the first 100 trials) and train set (the left trials). Then, we use the model trained with train set to predict the `feedback_type` in the test set. Then we can calculate predicted values and compare with actual values. Because there's no preference between reward and penalty, we don't have to prioritize sensitivity and specificity, so we choose threshold = 0.5.
+
+```{r,message=F,warning=F,results='hide'}
+threshold = 0.5
+predicted_values = ifelse(predict(model_log, newdata = df_test)>threshold,1,0)
+actual_values = df_test$feedback_type
+actual_values=ifelse(actual_values == "1", 1, 0)
+conf_matrix = table(predicted_values, actual_values)
+conf_matrix
+```
+
+```{r,message=F,warning=FALSE,results='hide'}
+conf_chart <- data.frame(
+  cola = c("", "Predicted value=-1", "Predicted value=1"),
+  colb = c("Actual value=-1", "8", "18"),
+  colc = c("Actual value=1", "8", "66")
+)
+
+# Generate a table
+kable(conf_chart,col.names = NULL)%>%
+  kable_styling(full_width = FALSE) %>%
+  column_spec(1:3, border_left = TRUE,border_right = TRUE,bold = T)
+```
+
+$$Sensitivity=TPR=\frac{TP}{TP+FN}=\frac{66}{8+66}\approx0.89\\ Specificity=TNR=\frac{TN}{TN+FP}=\frac{18}{18+8}\approx0.31$$
+The sensitivity of 0.89 means that prediction model correctly identified 89% of the positive cases, while a specificity of 0.31 means that the model correctly identified only 31% of the negative cases. This suggests that this model is better at predicting positive cases than negative cases. The possible reason for this is in the train set, the number of `feedback_type`=-1 is significantly less than the number of `feedback_type`=1, which leads to the problem of sample imbalance. The problem of sample imbalance can be solved by using resampling.
+
+```{r,fig.cap="**Figure 12:**ROC plot",message=F,warning=F}
+roc_plt <- roc(actual_values, predicted_values)
+plot(roc_plt, print.thres = "best", legacy.axes = TRUE)
+auc(roc_plt)
+```
+
+**Findings:** AUC=0.5998, which is larger than 0.5 meaning a good classifier.
+
+
+## Summary for the fourth parts
+
+**1. Use `contrast_left`, `contrast_right`, `firing_rate`, `session` to predict `feedback_type` in a logistic model, and interpret the model**
+
+**2. After the model diagnosis, use the test set to check the model performance, and finally found that the model is a good fit**
+
+
+# Reference {-}
+
+Steinmetz, N.A., Zatka-Haas, P., Carandini, M. et al. Distributed coding of choice, action and engagement across the mouse brain. Nature 576, 266–273 (2019). https://doi.org/10.1038/s41586-019-1787-x
+
+
